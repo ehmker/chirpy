@@ -1,12 +1,15 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log"
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -19,6 +22,7 @@ type DB struct {
 type DBStructure struct {
 	Chirps map[int]Chirp `json:"chirps"`
 	Users map[int]User `json:"users"`
+	RefreshTokens map[string]RefreshToken `json:"refresh_tokens"`
 }
 
 type Chirp struct {
@@ -27,9 +31,17 @@ type Chirp struct {
 }
 type User struct {
 	Id int `json:"id"`
-	Email string `json:"email"`
+	Email string `json:"email,omitempty"`
 	Password string `json:"password,omitempty"`
+	AuthToken string `json:"token,omitempty"`
+	RefreshToken string `json:"refresh_token,omitempty"`
 }
+type RefreshToken struct {
+	Id int `json:"id"`
+	Token string `json:"token_string"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
 
 
 // NewDB creates a new database connection
@@ -141,6 +153,40 @@ func (db *DB) UserLogin(email, password string) (User, error) {
 
 }
 
+func (db *DB) UpdateUserLogin(id int, email, password string) (User, error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	database, err := db.loadDB()
+	if err != nil {
+		log.Printf("error in GetChirpByID loading database: %v\n", err)
+		return User{}, err
+	}
+
+	u, exists := database.Users[id]
+	if !exists{
+		return User{}, errors.New("unable to update login.  user not found")
+	}
+	
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil{
+		log.Println("error hashing password: ", err)
+	}
+
+	u.Password = string(hashedPassword)
+	u.Email = email
+	
+	database.Users[id] = u
+
+	err = db.writeDB(database)
+	if err != nil {
+		log.Printf("error in writing database")
+	}
+
+	return User{Id: id,
+	Email: email,}, nil
+}
+
 // GetChirps returns all chirps in the database
 func (db *DB) GetChirps() ([]Chirp, error) {
 	db.mu.Lock()
@@ -206,7 +252,8 @@ func (db *DB) loadDB() (DBStructure, error) {
 		log.Println("Database file is empty, initialize new DBStructure")
 		dbs = DBStructure{
 			Chirps: make(map[int]Chirp),
-			Users: 	make(map[int]User),}
+			Users: 	make(map[int]User),
+			RefreshTokens: map[string]RefreshToken{},}
 		return dbs, nil
 	}
 
@@ -241,3 +288,61 @@ func (db *DBStructure) userEmailExists(email string) (User, bool) {
 	return User{}, false
 }
 
+func (db *DB) generateRefreshToken(id int) (string, error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	
+	sz := make([]byte, 32)
+	_, err := rand.Read(sz)
+	if err != nil {
+		return "", err
+	}
+	encodedRfshStr := hex.EncodeToString(sz)
+
+	tkn := RefreshToken{
+		Id: id,
+		Token: encodedRfshStr,
+		ExpiresAt: time.Now().AddDate(0, 0, 60),
+	}
+
+	database, err := db.loadDB()
+	if err != nil {
+		log.Fatal("problem loading database: ", err.Error())
+	}
+	database.RefreshTokens[encodedRfshStr] = tkn
+	err = db.writeDB(database)
+	if err != nil {
+		log.Fatal("problem writing database: ", err.Error())
+	}
+
+	return encodedRfshStr, nil
+}
+
+func (db *DB) refreshTokenIsOK(tkn string) (int, bool){
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	database, err := db.loadDB()
+	if err != nil {
+		log.Fatal("problem loading database: ", err.Error())
+	}
+
+	rfshToken, exists := database.RefreshTokens[tkn]
+	if !exists {
+		return 0, false
+	}
+	//return the associated user id and if ExpiresAt is After current time
+	return rfshToken.Id, rfshToken.ExpiresAt.After(time.Now())
+	
+}
+
+func (db *DB) removeRefreshToken(tkn string) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	database, err := db.loadDB()
+	if err != nil {
+		log.Fatal("problem loading database: ", err.Error())
+	}
+	delete(database.RefreshTokens, tkn)
+	db.writeDB(database)
+}

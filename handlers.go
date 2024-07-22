@@ -7,6 +7,9 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 type apiConfig struct {
@@ -15,7 +18,6 @@ type apiConfig struct {
 	db 				DB
 	jwtSecret		string
 }
-
 
 //Organizational =>
 //Attaching all handlers to the multiplexer
@@ -32,8 +34,9 @@ func attachHandlers (mux *http.ServeMux, config *apiConfig) *http.ServeMux {
 	mux.HandleFunc("GET /api/chirps/{chirpid}", config.getChirpByIDHandler)
 	mux.HandleFunc("POST /api/users", config.postUserHandler)
 	mux.HandleFunc("POST /api/login", config.postLoginHandler)
-
-
+	mux.HandleFunc("PUT /api/users", config.putUserHandler)
+	mux.HandleFunc("POST /api/refresh", config.postRefreshHandler)
+	mux.HandleFunc("POST /api/revoke", config.postRevokeHandler)
 
 	return mux
 }
@@ -140,7 +143,7 @@ func (cfg *apiConfig)  postLoginHandler(w http.ResponseWriter, r *http.Request) 
 	err := decoder.Decode(&params)
 
 	if err != nil {
-		respondWithError(w, 500, "Something went wrong")
+		respondWithError(w, 500, err.Error())
 		return
 	} 
 
@@ -148,9 +151,47 @@ func (cfg *apiConfig)  postLoginHandler(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		respondWithError(w, 401, err.Error())
 	}
+	
+	//auth token
+	signedStr, err := cfg.generateAuthToken(user.Id)
+	if err != nil{
+		log.Println("error signing token string: ", err)
+		respondWithError(w, 500, err.Error())
+	}
+	user.AuthToken = signedStr
+	
+	//refresh token
+	user.RefreshToken, err = cfg.db.generateRefreshToken(user.Id)
+	if err != nil {
+		log.Println("error generating refresh token: ", err.Error())
+		respondWithError(w, 500, err.Error())
+	}
 	respondWithJSON(w, 200, user)
 
 
+}
+
+func (cfg *apiConfig) postRefreshHandler(w http.ResponseWriter, r *http.Request) {
+	rToken := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+
+	userID, ok := cfg.db.refreshTokenIsOK(rToken)
+	if !ok { 
+		respondWithError(w, 401, "invalid token")
+	}
+	
+	newAuth, err := cfg.generateAuthToken(userID)
+	if err != nil {
+		respondWithError(w, 500, err.Error())
+	}
+	respondWithJSON(w, 200, struct{
+		Token string `json:"token"`
+	}{Token: newAuth})
+}
+
+func (cfg *apiConfig) postRevokeHandler (w http.ResponseWriter, r *http.Request) {
+	rToken := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	cfg.db.removeRefreshToken(rToken)
+	respondWithJSON(w, 204, nil)
 }
 
 
@@ -184,6 +225,65 @@ func (cfg *apiConfig) getChirpByIDHandler(w http.ResponseWriter, r *http.Request
 
 	respondWithJSON(w, 200, chirp)
 	
+}
+
+func (cfg *apiConfig) putUserHandler(w http.ResponseWriter, r *http.Request) {
+	//handle header
+	authToken := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	claims, err := cfg.parseJWTToken(authToken)
+	if err != nil {
+		log.Println("error parsing token: ", err)
+		respondWithError(w, 401, err.Error())
+		return
+	}
+
+	userId, err := strconv.Atoi(claims.Subject)
+
+	if err != nil {
+		log.Println("error converting to integer: ", err)
+	}
+
+	//Handle Body
+	type parameters struct {
+		Email 				string 	`json:"email"`
+		Password 			string  `json:"password"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err = decoder.Decode(&params)
+	if err != nil {
+		respondWithError(w, 500, "Something went wrong")
+		return
+	} 
+
+	u, err := cfg.db.UpdateUserLogin(userId, params.Email, params.Password)
+	if err != nil{
+		respondWithError(w, 500, "Something went wrong")
+		return
+	}
+	respondWithJSON(w, 200, u)
+	
+}
+
+func (cfg *apiConfig) parseJWTToken(tokenString string) (*jwt.RegisteredClaims, error) {
+	token, err := jwt.ParseWithClaims(tokenString, 
+		&jwt.RegisteredClaims{}, 
+		func (token *jwt.Token) (interface{}, error) {
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+			}
+			// Return the secret key used for signing
+			return []byte(cfg.jwtSecret), nil
+	})
+
+	if err != nil || !token.Valid {
+		return nil, err
+	}
+	if claims, ok := token.Claims.(*jwt.RegisteredClaims); ok && token.Valid {
+        return claims, nil
+    } else {
+        return nil, fmt.Errorf("invalid token claims")
+    }
 }
 
 func respondWithError(w http.ResponseWriter, code int, msg string) {
@@ -221,4 +321,18 @@ func cleanMessage(s string) string {
 		}
 	}
 	return strings.Join(msg, " ")
+}
+func (cfg *apiConfig) generateAuthToken(userid int) (string, error) {
+	curTime := time.Now().UTC()
+	claims := jwt.RegisteredClaims{
+		Issuer: "chirpy",
+		IssuedAt: jwt.NewNumericDate(curTime),
+		ExpiresAt: jwt.NewNumericDate(curTime.Add(time.Duration(1)*time.Hour)),
+		Subject: strconv.Itoa(userid),
+	}
+
+	jwtToken := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	
+
+	return jwtToken.SignedString([]byte(cfg.jwtSecret))
 }

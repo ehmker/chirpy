@@ -79,12 +79,28 @@ func (cfg *apiConfig) adminMetricsHandler(w http.ResponseWriter, r *http.Request
 }
 
 func (cfg *apiConfig) postChirpHandler(w http.ResponseWriter, r *http.Request) {
+	//handle header
+	authToken := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	claims, err := cfg.parseJWTToken(authToken)
+	if err != nil {
+		log.Println("error parsing token: ", err)
+		respondWithError(w, 401, err.Error())
+		return
+	}
+
+	userId, err := strconv.Atoi(claims.Subject)
+
+	if err != nil {
+		log.Println("error converting to integer: ", err)
+	}
+
+	//Handle Body
 	type parameters struct {
 		Body string `json:"body"`
 	}
 	decoder := json.NewDecoder(r.Body)
 	params := parameters{}
-	err := decoder.Decode(&params)
+	err = decoder.Decode(&params)
 
 	if err != nil {
 		respondWithError(w, 500, "Something went wrong")
@@ -96,7 +112,7 @@ func (cfg *apiConfig) postChirpHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	params.Body = cleanMessage(params.Body)
-	chirp, err  := cfg.db.CreateChirp(params.Body)
+	chirp, err  := cfg.db.CreateChirp(params.Body, userId)
 	if err != nil {
 		log.Println("error creating chirp: ", err)
 		respondWithError(w, 500, "Something went wrong")

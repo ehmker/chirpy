@@ -28,6 +28,7 @@ type DBStructure struct {
 type Chirp struct {
 	Id int `json:"id"`
 	Body string `json:"body"`
+	AuthorId int `json:"author_id"`
 }
 type User struct {
 	Id int `json:"id"`
@@ -56,7 +57,7 @@ func NewDB(path string) (*DB, error) {
 	return &db, err
 }
 // CreateChirp creates a new chirp and saves it to disk
-func (db *DB) CreateChirp(body string) (Chirp, error) {
+func (db *DB) CreateChirp(body string, authorID int) (Chirp, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -69,6 +70,8 @@ func (db *DB) CreateChirp(body string) (Chirp, error) {
 	newChirp := Chirp{
 		Id: i,
 		Body: body,
+		AuthorId: authorID,
+
 	}
 
 	database.Chirps[i] = newChirp

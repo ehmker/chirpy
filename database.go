@@ -349,3 +349,28 @@ func (db *DB) removeRefreshToken(tkn string) {
 	delete(database.RefreshTokens, tkn)
 	db.writeDB(database)
 }
+
+func (db *DB)  removeChirpByID(chirpId, AuthorId int) (int, error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	database, err := db.loadDB()
+	if err != nil {
+		log.Fatal("problem loading database: ", err.Error())
+	}
+
+	targetChirp, ok := database.Chirps[chirpId]
+	
+	if !ok {
+		return 404, errors.New("chirp does not exist")
+	}
+	if targetChirp.AuthorId != AuthorId {
+		return 403, errors.New("error removing chirp. user is not author")
+	}
+	delete(database.Chirps, chirpId)
+	err = db.writeDB(database)
+	if err != nil{
+		log.Fatal("problem writing database")
+	}
+	return 204, nil
+
+}

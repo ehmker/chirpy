@@ -25,18 +25,27 @@ func attachHandlers (mux *http.ServeMux, config *apiConfig) *http.ServeMux {
 	fileServer := http.FileServer(http.Dir("./app"))
 
 	mux.Handle("/app/*", config.middlewareMetricsInc(http.StripPrefix("/app", fileServer)))
+	mux.HandleFunc("/api/reset", config.resetHandler)
+	
+	//GET
 	mux.HandleFunc("GET /api/healthz", healthzHandler)
 	mux.HandleFunc("GET /api/metrics", config.fileserverCountHandler)
-	mux.HandleFunc("/api/reset", config.resetHandler)
 	mux.HandleFunc("GET /admin/metrics", config.adminMetricsHandler)
-	mux.HandleFunc("POST /api/chirps", config.postChirpHandler)
 	mux.HandleFunc("GET /api/chirps", config.getChirpsHandler)
 	mux.HandleFunc("GET /api/chirps/{chirpid}", config.getChirpByIDHandler)
+
+	//POST
+	mux.HandleFunc("POST /api/chirps", config.postChirpHandler)
 	mux.HandleFunc("POST /api/users", config.postUserHandler)
 	mux.HandleFunc("POST /api/login", config.postLoginHandler)
-	mux.HandleFunc("PUT /api/users", config.putUserHandler)
 	mux.HandleFunc("POST /api/refresh", config.postRefreshHandler)
 	mux.HandleFunc("POST /api/revoke", config.postRevokeHandler)
+
+	//PUT
+	mux.HandleFunc("PUT /api/users", config.putUserHandler)
+
+	//DELETE
+	mux.HandleFunc("DELETE /api/chirps/{chirpid}", config.deleteChirpByID)
 
 	return mux
 }
@@ -80,18 +89,9 @@ func (cfg *apiConfig) adminMetricsHandler(w http.ResponseWriter, r *http.Request
 
 func (cfg *apiConfig) postChirpHandler(w http.ResponseWriter, r *http.Request) {
 	//handle header
-	authToken := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	claims, err := cfg.parseJWTToken(authToken)
+	userId, err := cfg.checkAuthorization(r)
 	if err != nil {
-		log.Println("error parsing token: ", err)
 		respondWithError(w, 401, err.Error())
-		return
-	}
-
-	userId, err := strconv.Atoi(claims.Subject)
-
-	if err != nil {
-		log.Println("error converting to integer: ", err)
 	}
 
 	//Handle Body
@@ -204,7 +204,7 @@ func (cfg *apiConfig) postRefreshHandler(w http.ResponseWriter, r *http.Request)
 	}{Token: newAuth})
 }
 
-func (cfg *apiConfig) postRevokeHandler (w http.ResponseWriter, r *http.Request) {
+func (cfg *apiConfig) postRevokeHandler(w http.ResponseWriter, r *http.Request) {
 	rToken := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	cfg.db.removeRefreshToken(rToken)
 	respondWithJSON(w, 204, nil)
@@ -245,18 +245,9 @@ func (cfg *apiConfig) getChirpByIDHandler(w http.ResponseWriter, r *http.Request
 
 func (cfg *apiConfig) putUserHandler(w http.ResponseWriter, r *http.Request) {
 	//handle header
-	authToken := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	claims, err := cfg.parseJWTToken(authToken)
+	userId, err := cfg.checkAuthorization(r)
 	if err != nil {
-		log.Println("error parsing token: ", err)
 		respondWithError(w, 401, err.Error())
-		return
-	}
-
-	userId, err := strconv.Atoi(claims.Subject)
-
-	if err != nil {
-		log.Println("error converting to integer: ", err)
 	}
 
 	//Handle Body
@@ -279,6 +270,35 @@ func (cfg *apiConfig) putUserHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	respondWithJSON(w, 200, u)
 	
+}
+
+func (cfg *apiConfig) deleteChirpByID(w http.ResponseWriter, r *http.Request) {
+	//Handle Header
+	userID, err := cfg.checkAuthorization(r)
+	if err != nil {
+		respondWithError(w, 401, err.Error())
+	}
+
+	//Handle Body
+	pathParts := strings.Split(r.RequestURI, "/")
+	if len(pathParts) != 4 {
+		log.Println("request longer than expected: ", pathParts)
+		return
+	}
+	chirpID, err := strconv.Atoi(pathParts[3])
+	if err != nil {
+		log.Printf("problem converting id to in: '%s'\n", pathParts[3])
+	}
+
+	//Handle Behavior
+	code, err := cfg.db.removeChirpByID(chirpID, userID)
+
+	if err != nil{
+		respondWithError(w, code, err.Error())
+		return
+	}
+	respondWithJSON(w, code, "")
+
 }
 
 func (cfg *apiConfig) parseJWTToken(tokenString string) (*jwt.RegisteredClaims, error) {
@@ -351,4 +371,20 @@ func (cfg *apiConfig) generateAuthToken(userid int) (string, error) {
 	
 
 	return jwtToken.SignedString([]byte(cfg.jwtSecret))
+}
+
+
+func (cfg *apiConfig) checkAuthorization(r *http.Request) (int, error) {
+	authToken := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	claims, err := cfg.parseJWTToken(authToken)
+	if err != nil {
+		return 0, err
+	}
+	userId, err := strconv.Atoi(claims.Subject)
+
+	if err != nil {
+		return 0, err
+	}
+
+	return userId, nil
 }

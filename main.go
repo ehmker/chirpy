@@ -26,6 +26,7 @@ config := &apiConfig{
 	nextID: 0,
 	db: *database,
 	jwtSecret: os.Getenv("JWT_SECRET"),
+	polkaAPIKey: os.Getenv("POLKA_API_KEY"),
 
 }
 

@@ -17,6 +17,7 @@ type apiConfig struct {
 	nextID 			int
 	db 				DB
 	jwtSecret		string
+	polkaAPIKey		string
 }
 
 //Organizational =>
@@ -40,6 +41,8 @@ func attachHandlers (mux *http.ServeMux, config *apiConfig) *http.ServeMux {
 	mux.HandleFunc("POST /api/login", config.postLoginHandler)
 	mux.HandleFunc("POST /api/refresh", config.postRefreshHandler)
 	mux.HandleFunc("POST /api/revoke", config.postRevokeHandler)
+
+	mux.HandleFunc("POST /api/polka/webhooks", config.postUpdateMembership)
 
 	//PUT
 	mux.HandleFunc("PUT /api/users", config.putUserHandler)
@@ -89,7 +92,7 @@ func (cfg *apiConfig) adminMetricsHandler(w http.ResponseWriter, r *http.Request
 
 func (cfg *apiConfig) postChirpHandler(w http.ResponseWriter, r *http.Request) {
 	//handle header
-	userId, err := cfg.checkAuthorization(r)
+	userId, err := cfg.checkJWTAuthorization(r)
 	if err != nil {
 		respondWithError(w, 401, err.Error())
 	}
@@ -210,15 +213,73 @@ func (cfg *apiConfig) postRevokeHandler(w http.ResponseWriter, r *http.Request) 
 	respondWithJSON(w, 204, nil)
 }
 
+func (cfg *apiConfig) postUpdateMembership(w http.ResponseWriter, r *http.Request) {
+	//Handle Header
+	apiKey := strings.TrimPrefix(r.Header.Get("Authorization"), "ApiKey ")
+	if apiKey != cfg.polkaAPIKey{
+		respondWithError(w, 401, "invalid api key")
+	}
+	//Handle Body
+	type parameters struct{
+		Event string `json:"event"`
+		Data  struct {
+			UserID int `json:"user_id"`
+		} `json:"data"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+
+	if err != nil {
+		respondWithError(w, 500, err.Error())
+		return
+	} 
+	
+	//Handle Behavior
+	if params.Event != "user.upgraded"{
+		respondWithJSON(w, 204, nil)
+		return
+	}
+
+	err = cfg.db.upgradeUser(params.Data.UserID)
+	if err != nil {
+		respondWithError(w, 404, err.Error())
+	}
+	respondWithJSON(w, 204, nil)
+
+
+
+}
+
 
 func (cfg *apiConfig) getChirpsHandler(w http.ResponseWriter, r *http.Request) {
-	allChirps, err := cfg.db.GetChirps()
+	authorID := strings.ToLower(r.URL.Query().Get("author_id"))
+	sortOrder := strings.ToLower( r.URL.Query().Get("sort"))
+	var allChirps []Chirp
+	var err error
+	if authorID == ""{
+		allChirps, err = cfg.db.GetChirps()
+		
+	} else {
+		allChirps, err = cfg.db.GetChirpsByAuthorID(authorID)
+	}
 	if err != nil {
 		log.Println("error getting chirps: ", err)
 		respondWithError(w, 500, "Something went wrong")
 		return
 	}
-	respondWithJSON(w, 200, allChirps)	
+	orderChirpSlice(allChirps, sortOrder)
+
+	respondWithJSON(w, 200, allChirps)
+}
+
+func orderChirpSlice(chirpSlice []Chirp, orderBy string) {
+	switch orderBy {
+	case "desc":
+		ChirpOrder(chirpSlice).SortByIdDesc()
+	default:
+		ChirpOrder(chirpSlice).SortByIdAsc()
+	}
 }
 
 func (cfg *apiConfig) getChirpByIDHandler(w http.ResponseWriter, r *http.Request) {
@@ -245,7 +306,7 @@ func (cfg *apiConfig) getChirpByIDHandler(w http.ResponseWriter, r *http.Request
 
 func (cfg *apiConfig) putUserHandler(w http.ResponseWriter, r *http.Request) {
 	//handle header
-	userId, err := cfg.checkAuthorization(r)
+	userId, err := cfg.checkJWTAuthorization(r)
 	if err != nil {
 		respondWithError(w, 401, err.Error())
 	}
@@ -274,7 +335,7 @@ func (cfg *apiConfig) putUserHandler(w http.ResponseWriter, r *http.Request) {
 
 func (cfg *apiConfig) deleteChirpByID(w http.ResponseWriter, r *http.Request) {
 	//Handle Header
-	userID, err := cfg.checkAuthorization(r)
+	userID, err := cfg.checkJWTAuthorization(r)
 	if err != nil {
 		respondWithError(w, 401, err.Error())
 	}
@@ -374,7 +435,7 @@ func (cfg *apiConfig) generateAuthToken(userid int) (string, error) {
 }
 
 
-func (cfg *apiConfig) checkAuthorization(r *http.Request) (int, error) {
+func (cfg *apiConfig) checkJWTAuthorization(r *http.Request) (int, error) {
 	authToken := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	claims, err := cfg.parseJWTToken(authToken)
 	if err != nil {
@@ -388,3 +449,4 @@ func (cfg *apiConfig) checkAuthorization(r *http.Request) (int, error) {
 
 	return userId, nil
 }
+

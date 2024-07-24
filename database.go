@@ -7,6 +7,8 @@ import (
 	"errors"
 	"log"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,8 +32,23 @@ type Chirp struct {
 	Body string `json:"body"`
 	AuthorId int `json:"author_id"`
 }
+
+type ChirpOrder []Chirp
+func (c ChirpOrder) SortByIdAsc() {
+	sort.Slice(c, func (i, j int) bool  {
+		return c[i].Id < c[j].Id
+	})
+}
+func (c ChirpOrder) SortByIdDesc() {
+	sort.Slice(c, func (i, j int) bool  {
+		return c[i].Id > c[j].Id
+	})
+}
+		
+
 type User struct {
 	Id int `json:"id"`
+	IsChirpyRed bool `json:"is_chirpy_red"`
 	Email string `json:"email,omitempty"`
 	Password string `json:"password,omitempty"`
 	AuthToken string `json:"token,omitempty"`
@@ -152,6 +169,7 @@ func (db *DB) UserLogin(email, password string) (User, error) {
 	return User{
 		Id: user.Id,
 		Email: user.Email,
+		IsChirpyRed: user.IsChirpyRed,
 		}, nil
 
 }
@@ -206,6 +224,29 @@ func (db *DB) GetChirps() ([]Chirp, error) {
 		chirps = append(chirps, chirp)
 	}
 
+	return chirps, nil
+}
+
+func (db *DB) GetChirpsByAuthorID(authorId string) ([]Chirp, error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	id, err := strconv.Atoi(authorId)
+	if err != nil{
+		return []Chirp{}, errors.New("invalid author_id")
+	}
+	chirps := []Chirp{}
+
+	database, err := db.loadDB()
+	if err != nil {
+		log.Printf("error in GetChirps loading database: %v\n", err)
+		return []Chirp{}, err
+	}
+
+	for _, chirp := range database.Chirps {
+		if chirp.AuthorId == id {
+			chirps = append(chirps, chirp)
+		}
+	}
 	return chirps, nil
 }
 
@@ -372,5 +413,31 @@ func (db *DB)  removeChirpByID(chirpId, AuthorId int) (int, error) {
 		log.Fatal("problem writing database")
 	}
 	return 204, nil
+
+}
+
+
+func (db *DB) upgradeUser(userID int) (error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	database, err := db.loadDB()
+	if err != nil {
+		log.Fatal("problem loading database: ", err.Error())
+	}
+
+	user, exists := database.Users[userID]
+
+	if !exists {
+		return errors.New("user not found")
+	}
+	user.IsChirpyRed = true
+	database.Users[userID] = user
+
+	err = db.writeDB(database)
+	if err != nil{
+		log.Fatal("problem writing database")
+	}
+
+	return nil
 
 }
